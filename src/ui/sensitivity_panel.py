@@ -20,18 +20,18 @@ class SensitivityAnalysisPanel(QWidget):
         self.setVisible(False)
 
     def _build(self):
-        # Base layout
+        # Base layout: header (outside) + card
         base_layout = QVBoxLayout(self)
         base_layout.setContentsMargins(0, 0, 0, 0)
         base_layout.setSpacing(10)
 
-        # Header
+        # Header (outside the white card)
         self.header_label = QLabel("Sensitivity Analysis")
         self.header_label.setFont(QFont("Segoe UI", 14, QFont.Bold))
         self.header_label.setStyleSheet(f"color: {TEXT_PRIMARY}; background: transparent; border: none;")
         base_layout.addWidget(self.header_label)
 
-        # The main card
+        # The main card (white background)
         self.card_frame = QFrame()
         self.card_frame.setObjectName("MainCard")
         self.card_frame.setStyleSheet(f"""
