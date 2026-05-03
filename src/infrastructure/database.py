@@ -1,16 +1,26 @@
 import sqlite3
-from typing import List, Tuple, Dict, Any, Optional
-from datetime import datetime
+import hashlib
+import secrets
+from typing import List, Tuple, Dict, Any
+
 import numpy as np
 
 from ..domain.disease_model import DiseaseModel
 from ..domain.action import Action
 
 
+# ---------------------------------------------------------------------------
+# Connection
+# ---------------------------------------------------------------------------
+
 def get_connection():
-    """Get a database connection."""
+    """Get a database connection to cdss.db."""
     return sqlite3.connect("cdss.db")
 
+
+# ---------------------------------------------------------------------------
+# Schema initialisation
+# ---------------------------------------------------------------------------
 
 def init_db():
     """
@@ -123,7 +133,6 @@ def init_db():
             )
         """)
 
-        # New table for tracking clinician decisions and recommendations
         conn.execute("""
             CREATE TABLE IF NOT EXISTS recommendation_run (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -141,12 +150,16 @@ def init_db():
         print("Database tables initialized successfully")
 
 
+# ---------------------------------------------------------------------------
+# Seed data
+# ---------------------------------------------------------------------------
+
 def seed_data():
     """
     Seed the database with two real diseases:
     1. Type 2 Diabetes — transition probabilities from Varshney et al. (2020)
-       'Estimation of transition probabilities for diabetic patients using HMM'
     2. Chronic Kidney Disease — based on published CKD progression literature
+    Also creates a demo user account (admin / admin123).
     """
     with get_connection() as conn:
         conn.execute("PRAGMA foreign_keys = ON")
@@ -164,8 +177,6 @@ def seed_data():
 
         # ---------------------------------------------------------------
         # Disease 1 — Type 2 Diabetes
-        # Transition matrix from Varshney et al. (2020), Table 4
-        # States based on HbA1c levels
         # ---------------------------------------------------------------
         conn.execute("""
             INSERT INTO disease (name, description) VALUES (?, ?)
@@ -180,7 +191,6 @@ def seed_data():
         diabetes_states = ["Normal", "Pre-diabetic", "Diabetic"]
         diabetes_severity = {"Normal": 1, "Pre-diabetic": 3, "Diabetic": 5}
         diabetes_state_ids = {}
-
         for state in diabetes_states:
             conn.execute("""
                 INSERT INTO disease_state (disease_id, state_name, severity_level)
@@ -194,19 +204,17 @@ def seed_data():
         """, (diabetes_id, "HbA1c-based Diabetes Model", "1.0.0", 1))
         diabetes_model_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
-        # From Varshney et al. (2020), Table 4 — estimated transition probabilities
         diabetes_transitions = [
-            ("Normal",      "Normal",      0.280),
-            ("Normal",      "Pre-diabetic",0.208),
-            ("Normal",      "Diabetic",    0.512),
-            ("Pre-diabetic","Normal",      0.267),
-            ("Pre-diabetic","Pre-diabetic",0.339),
-            ("Pre-diabetic","Diabetic",    0.394),
-            ("Diabetic",    "Normal",      0.240),
-            ("Diabetic",    "Pre-diabetic",0.196),
-            ("Diabetic",    "Diabetic",    0.564),
+            ("Normal",       "Normal",       0.280),
+            ("Normal",       "Pre-diabetic", 0.208),
+            ("Normal",       "Diabetic",     0.512),
+            ("Pre-diabetic", "Normal",       0.267),
+            ("Pre-diabetic", "Pre-diabetic", 0.339),
+            ("Pre-diabetic", "Diabetic",     0.394),
+            ("Diabetic",     "Normal",       0.240),
+            ("Diabetic",     "Pre-diabetic", 0.196),
+            ("Diabetic",     "Diabetic",     0.564),
         ]
-
         for from_state, to_state, prob in diabetes_transitions:
             conn.execute("""
                 INSERT INTO markov_transition (model_id, from_state_id, to_state_id, probability)
@@ -218,7 +226,7 @@ def seed_data():
 
         diabetes_actions = [
             ("Watch and Wait",
-             "Monitor HbA1c levels and reassess at next visit. No pharmacological intervention.",
+             "Monitor HbA1c levels. No pharmacological intervention.",
              None, None, 0.0),
             ("Prescribe Metformin",
              "First-line pharmacological treatment. Reduces hepatic glucose production.",
@@ -230,7 +238,6 @@ def seed_data():
              "Escalate to specialist for advanced diabetes management.",
              "Normal", "Diabetic", 0.15),
         ]
-
         diabetes_action_ids = {}
         for name, desc, improve, worsen, delta in diabetes_actions:
             conn.execute("""
@@ -241,12 +248,11 @@ def seed_data():
             diabetes_action_ids[name] = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
         diabetes_utilities = {
-            "Watch and Wait":          {"benefit": 0.20, "risk": 0.05, "cost": 0.02},
-            "Prescribe Metformin":     {"benefit": 0.75, "risk": 0.10, "cost": 0.12},
-            "Lifestyle Intervention":  {"benefit": 0.60, "risk": 0.05, "cost": 0.08},
-            "Refer to Endocrinologist":{"benefit": 0.70, "risk": 0.08, "cost": 0.10},
+            "Watch and Wait":           {"benefit": 0.20, "risk": 0.05, "cost": 0.02},
+            "Prescribe Metformin":      {"benefit": 0.75, "risk": 0.10, "cost": 0.12},
+            "Lifestyle Intervention":   {"benefit": 0.60, "risk": 0.05, "cost": 0.08},
+            "Refer to Endocrinologist": {"benefit": 0.70, "risk": 0.08, "cost": 0.10},
         }
-
         for state_name in diabetes_states:
             state_id = diabetes_state_ids[state_name]
             for action_name, u in diabetes_utilities.items():
@@ -260,7 +266,6 @@ def seed_data():
 
         # ---------------------------------------------------------------
         # Disease 2 — Chronic Kidney Disease (CKD)
-        # States based on GFR (glomerular filtration rate)
         # ---------------------------------------------------------------
         conn.execute("""
             INSERT INTO disease (name, description) VALUES (?, ?)
@@ -274,7 +279,6 @@ def seed_data():
         ckd_states = ["Normal", "Mild CKD", "Severe CKD"]
         ckd_severity = {"Normal": 1, "Mild CKD": 3, "Severe CKD": 5}
         ckd_state_ids = {}
-
         for state in ckd_states:
             conn.execute("""
                 INSERT INTO disease_state (disease_id, state_name, severity_level)
@@ -288,19 +292,17 @@ def seed_data():
         """, (ckd_id, "GFR-based CKD Progression Model", "1.0.0", 1))
         ckd_model_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
-        # CKD is more progressive and less reversible than diabetes
         ckd_transitions = [
-            ("Normal",    "Normal",    0.90),
-            ("Normal",    "Mild CKD",  0.08),
-            ("Normal",    "Severe CKD",0.02),
-            ("Mild CKD",  "Normal",    0.05),
-            ("Mild CKD",  "Mild CKD",  0.75),
-            ("Mild CKD",  "Severe CKD",0.20),
-            ("Severe CKD","Normal",    0.02),
-            ("Severe CKD","Mild CKD",  0.08),
-            ("Severe CKD","Severe CKD",0.90),
+            ("Normal",    "Normal",     0.90),
+            ("Normal",    "Mild CKD",   0.08),
+            ("Normal",    "Severe CKD", 0.02),
+            ("Mild CKD",  "Normal",     0.05),
+            ("Mild CKD",  "Mild CKD",   0.75),
+            ("Mild CKD",  "Severe CKD", 0.20),
+            ("Severe CKD","Normal",     0.02),
+            ("Severe CKD","Mild CKD",   0.08),
+            ("Severe CKD","Severe CKD", 0.90),
         ]
-
         for from_state, to_state, prob in ckd_transitions:
             conn.execute("""
                 INSERT INTO markov_transition (model_id, from_state_id, to_state_id, probability)
@@ -324,7 +326,6 @@ def seed_data():
              "Specialist referral for advanced CKD management and dialysis planning.",
              "Normal", "Severe CKD", 0.15),
         ]
-
         ckd_action_ids = {}
         for name, desc, improve, worsen, delta in ckd_actions:
             conn.execute("""
@@ -335,12 +336,11 @@ def seed_data():
             ckd_action_ids[name] = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
         ckd_utilities = {
-            "Watch and Wait":       {"benefit": 0.15, "risk": 0.05, "cost": 0.02},
-            "Blood Pressure Control":{"benefit": 0.70, "risk": 0.10, "cost": 0.12},
-            "Dietary Restriction":  {"benefit": 0.50, "risk": 0.05, "cost": 0.05},
-            "Refer to Nephrologist":{"benefit": 0.75, "risk": 0.08, "cost": 0.10},
+            "Watch and Wait":         {"benefit": 0.15, "risk": 0.05, "cost": 0.02},
+            "Blood Pressure Control": {"benefit": 0.70, "risk": 0.10, "cost": 0.12},
+            "Dietary Restriction":    {"benefit": 0.50, "risk": 0.05, "cost": 0.05},
+            "Refer to Nephrologist":  {"benefit": 0.75, "risk": 0.08, "cost": 0.10},
         }
-
         for state_name in ckd_states:
             state_id = ckd_state_ids[state_name]
             for action_name, u in ckd_utilities.items():
@@ -353,14 +353,13 @@ def seed_data():
                       u["benefit"], u["risk"], u["cost"]))
 
         # ---------------------------------------------------------------
-        # Patients — 3 diabetes, 3 CKD
+        # Patients
         # ---------------------------------------------------------------
         diabetes_patients = [
             ("P001", "John",  "Smith",    "Normal"),
             ("P002", "Maria", "Klein",    "Diabetic"),
             ("P003", "Lucas", "Mitchell", "Pre-diabetic"),
         ]
-
         ckd_patients = [
             ("P004", "Anna",   "Fischer", "Mild CKD"),
             ("P005", "James",  "Patel",   "Severe CKD"),
@@ -368,46 +367,58 @@ def seed_data():
         ]
 
         for patient_id, first, last, state in diabetes_patients:
-            conn.execute("""
-                INSERT INTO patient (id, first_name, last_name) VALUES (?, ?, ?)
-            """, (patient_id, first, last))
-            conn.execute("""
-                INSERT INTO patient_status
-                    (patient_id, disease_id, current_state_id, active_model_id)
-                VALUES (?, ?, ?, ?)
-            """, (patient_id, diabetes_id,
-                  diabetes_state_ids[state], diabetes_model_id))
+            conn.execute(
+                "INSERT INTO patient (id, first_name, last_name) VALUES (?, ?, ?)",
+                (patient_id, first, last))
+            conn.execute(
+                "INSERT INTO patient_status "
+                "(patient_id, disease_id, current_state_id, active_model_id) "
+                "VALUES (?, ?, ?, ?)",
+                (patient_id, diabetes_id, diabetes_state_ids[state], diabetes_model_id))
 
         for patient_id, first, last, state in ckd_patients:
-            conn.execute("""
-                INSERT INTO patient (id, first_name, last_name) VALUES (?, ?, ?)
-            """, (patient_id, first, last))
-            conn.execute("""
-                INSERT INTO patient_status
-                    (patient_id, disease_id, current_state_id, active_model_id)
-                VALUES (?, ?, ?, ?)
-            """, (patient_id, ckd_id,
-                  ckd_state_ids[state], ckd_model_id))
+            conn.execute(
+                "INSERT INTO patient (id, first_name, last_name) VALUES (?, ?, ?)",
+                (patient_id, first, last))
+            conn.execute(
+                "INSERT INTO patient_status "
+                "(patient_id, disease_id, current_state_id, active_model_id) "
+                "VALUES (?, ?, ?, ?)",
+                (patient_id, ckd_id, ckd_state_ids[state], ckd_model_id))
+
+        # ---------------------------------------------------------------
+        # Demo user: admin / admin123
+        # ---------------------------------------------------------------
+        demo_salt = secrets.token_hex(16)
+        demo_hashed = hashlib.sha256((demo_salt + "admin123").encode()).hexdigest()
+        conn.execute("""
+            INSERT OR IGNORE INTO users (username, hashed_password, salt)
+            VALUES (?, ?, ?)
+        """, ("admin", demo_hashed, demo_salt))
 
         conn.commit()
-        print("Database seeded: 2 diseases, 6 patients")
-        print("  - Type 2 Diabetes: 3 patients (P001-P003)")
-        print("  - Chronic Kidney Disease: 3 patients (P004-P006)")
+        print("Database seeded: 2 diseases, 6 patients, 1 demo user")
+        print("  - Type 2 Diabetes: P001-P003")
+        print("  - Chronic Kidney Disease: P004-P006")
+        print("  - Login: admin / admin123")
 
 
 # ---------------------------------------------------------------------------
-# Raw query functions
+# Core patient queries
 # ---------------------------------------------------------------------------
 
 def get_all_patients() -> List[Tuple[str, str, str, str]]:
-    """Returns a list of (patient_id, full_name, current_state, disease_name)."""
+    """
+    Returns a list of (patient_id, full_name, current_state, disease_name).
+    Kept for backward compatibility with ComparisonWidget, AuditWidget, TrendWidget.
+    """
     with get_connection() as conn:
         cursor = conn.execute("""
             SELECT
                 p.id,
-                p.first_name || ' ' || p.last_name as full_name,
-                ds.state_name as current_state,
-                d.name as disease_name
+                p.first_name || ' ' || p.last_name AS full_name,
+                ds.state_name AS current_state,
+                d.name AS disease_name
             FROM patient p
             JOIN patient_status ps ON p.id = ps.patient_id
             JOIN disease_state ds ON ps.current_state_id = ds.id
@@ -421,17 +432,21 @@ def get_all_patients_detailed() -> List[Dict[str, Any]]:
     """
     Returns detailed patient information including severity and model version.
     Used by PatientManagementView for the enhanced table display.
+
+    Returns:
+        List of dicts with keys: patient_id, first_name, last_name,
+        disease_name, current_state, severity_level, model_version, active_model_id
     """
     with get_connection() as conn:
         cursor = conn.execute("""
-            SELECT 
+            SELECT
                 p.id,
                 p.first_name,
                 p.last_name,
-                d.name as disease_name,
-                ds.state_name as current_state,
+                d.name AS disease_name,
+                ds.state_name AS current_state,
                 ds.severity_level,
-                mm.version as model_version,
+                mm.version AS model_version,
                 ps.active_model_id
             FROM patient p
             JOIN patient_status ps ON p.id = ps.patient_id
@@ -440,136 +455,38 @@ def get_all_patients_detailed() -> List[Dict[str, Any]]:
             JOIN markov_model mm ON ps.active_model_id = mm.id
             ORDER BY p.id
         """)
-        
         results = []
         for row in cursor.fetchall():
             results.append({
-                "patient_id": row[0],
-                "first_name": row[1],
-                "last_name": row[2],
-                "disease_name": row[3],
-                "current_state": row[4],
-                "severity_level": row[5],
-                "model_version": row[6],
-                "active_model_id": row[7]
-            })
-        return results
-
-
-def get_diseases_with_states() -> List[Dict[str, Any]]:
-    """
-    Returns all diseases with their states and active model IDs.
-    Used for populating the add patient form.
-    """
-    with get_connection() as conn:
-        cursor = conn.execute("""
-            SELECT 
-                d.id as disease_id,
-                d.name as disease_name,
-                ds.id as state_id,
-                ds.state_name,
-                ds.severity_level,
-                mm.id as model_id,
-                mm.version as model_version
-            FROM disease d
-            JOIN disease_state ds ON d.id = ds.disease_id
-            JOIN markov_model mm ON d.id = mm.disease_id
-            WHERE mm.is_active = 1
-            ORDER BY d.name, ds.severity_level
-        """)
-        
-        results = []
-        for row in cursor.fetchall():
-            results.append({
-                "disease_id": row[0],
-                "disease_name": row[1],
-                "state_id": row[2],
-                "state_name": row[3],
-                "severity_level": row[4],
-                "model_id": row[5],
-                "model_version": row[6]
-            })
-        return results
-
-
-def add_patient(patient_id: str, first_name: str, last_name: str, 
-                disease_id: int, state_id: int, model_id: int) -> bool:
-    """
-    Add a new patient to the database.
-    Returns True if successful, False if patient ID already exists.
-    """
-    with get_connection() as conn:
-        try:
-            # Check if patient already exists
-            cursor = conn.execute("SELECT 1 FROM patient WHERE id = ?", (patient_id,))
-            if cursor.fetchone():
-                return False
-            
-            # Insert into patient table
-            conn.execute("""
-                INSERT INTO patient (id, first_name, last_name)
-                VALUES (?, ?, ?)
-            """, (patient_id, first_name, last_name))
-            
-            # Insert into patient_status table
-            conn.execute("""
-                INSERT INTO patient_status (patient_id, disease_id, current_state_id, active_model_id)
-                VALUES (?, ?, ?, ?)
-            """, (patient_id, disease_id, state_id, model_id))
-            
-            conn.commit()
-            return True
-        except Exception as e:
-            print(f"Error adding patient: {e}")
-            return False
-
-
-def get_patient_summary_export() -> List[Dict[str, Any]]:
-    """
-    Returns all patients with full details for CSV export.
-    """
-    with get_connection() as conn:
-        cursor = conn.execute("""
-            SELECT 
-                p.id as patient_id,
-                p.first_name,
-                p.last_name,
-                d.name as disease_name,
-                ds.state_name as current_state,
-                ds.severity_level,
-                mm.version as model_version
-            FROM patient p
-            JOIN patient_status ps ON p.id = ps.patient_id
-            JOIN disease d ON ps.disease_id = d.id
-            JOIN disease_state ds ON ps.current_state_id = ds.id
-            JOIN markov_model mm ON ps.active_model_id = mm.id
-            ORDER BY p.id
-        """)
-        
-        results = []
-        for row in cursor.fetchall():
-            results.append({
-                "patient_id": row[0],
-                "first_name": row[1],
-                "last_name": row[2],
-                "disease_name": row[3],
-                "current_state": row[4],
-                "severity_level": row[5],
-                "model_version": row[6]
+                "patient_id":      row[0],
+                "first_name":      row[1],
+                "last_name":       row[2],
+                "disease_name":    row[3],
+                "current_state":   row[4],
+                "severity_level":  row[5],
+                "model_version":   row[6],
+                "active_model_id": row[7],
             })
         return results
 
 
 def get_model_for_patient(patient_id: str) -> Tuple[List[str], List[List[float]]]:
-    """Returns (state_names, transition_matrix) for the patient's active model."""
+    """
+    Returns (state_names, transition_matrix) for the patient's active model.
+
+    Args:
+        patient_id: The patient's ID string (e.g. "P001")
+
+    Returns:
+        Tuple of (list of state names, 2D transition matrix as list of lists)
+    """
     with get_connection() as conn:
-        cursor = conn.execute("""
-            SELECT active_model_id FROM patient_status WHERE patient_id = ?
-        """, (patient_id,))
+        cursor = conn.execute(
+            "SELECT active_model_id FROM patient_status WHERE patient_id = ?",
+            (patient_id,))
         result = cursor.fetchone()
         if not result:
             return [], []
-
         model_id = result[0]
 
         cursor = conn.execute("""
@@ -580,18 +497,16 @@ def get_model_for_patient(patient_id: str) -> Tuple[List[str], List[List[float]]
             ORDER BY ds.id
         """, (patient_id,))
         states = cursor.fetchall()
-
         state_names = [s[1] for s in states]
         state_id_to_index = {s[0]: i for i, s in enumerate(states)}
 
         n = len(state_names)
         matrix = [[0.0] * n for _ in range(n)]
 
-        cursor = conn.execute("""
-            SELECT from_state_id, to_state_id, probability
-            FROM markov_transition WHERE model_id = ?
-        """, (model_id,))
-
+        cursor = conn.execute(
+            "SELECT from_state_id, to_state_id, probability "
+            "FROM markov_transition WHERE model_id = ?",
+            (model_id,))
         for from_id, to_id, prob in cursor.fetchall():
             matrix[state_id_to_index[from_id]][state_id_to_index[to_id]] = prob
 
@@ -599,16 +514,21 @@ def get_model_for_patient(patient_id: str) -> Tuple[List[str], List[List[float]]
 
 
 def get_actions_for_patient(patient_id: str) -> List[Tuple]:
-    """Returns raw action tuples for the patient's current state."""
+    """
+    Returns raw action tuples for the patient's current disease and state.
+
+    Returns:
+        List of (action_name, description, expected_benefit, complication_risk,
+                 side_effect_cost, improve_state, worsen_state, delta)
+    """
     with get_connection() as conn:
-        cursor = conn.execute("""
-            SELECT ps.disease_id, ps.current_state_id
-            FROM patient_status ps WHERE ps.patient_id = ?
-        """, (patient_id,))
+        cursor = conn.execute(
+            "SELECT ps.disease_id, ps.current_state_id "
+            "FROM patient_status ps WHERE ps.patient_id = ?",
+            (patient_id,))
         result = cursor.fetchone()
         if not result:
             return []
-
         disease_id, current_state_id = result
 
         cursor = conn.execute("""
@@ -626,44 +546,50 @@ def get_actions_for_patient(patient_id: str) -> List[Tuple]:
             WHERE a.disease_id = ? AND au.state_id = ?
             ORDER BY a.action_name
         """, (disease_id, current_state_id))
-
         return cursor.fetchall()
 
 
+# ---------------------------------------------------------------------------
+# Analytics queries
+# ---------------------------------------------------------------------------
+
 def get_action_utility_comparison(disease_id: int) -> List[Dict[str, Any]]:
     """
-    Fetches all actions with their avg benefit, risk, cost across all states for a given disease.
-    Powers the "most effective strategies" insight.
-    
+    Fetches all actions with their avg benefit, risk, cost across all states
+    for a given disease. Powers the action effectiveness chart.
+
     Args:
         disease_id: The disease ID to query actions for
-        
+
     Returns:
-        List of dicts with keys: action_name, avg_benefit, avg_risk, avg_cost, net_utility
+        List of dicts with keys: action_name, avg_benefit, avg_risk,
+        avg_cost, net_utility. Sorted by net_utility descending.
     """
     with get_connection() as conn:
         cursor = conn.execute("""
-            SELECT 
+            SELECT
                 a.action_name,
-                AVG(au.expected_benefit) as avg_benefit,
-                AVG(au.complication_risk) as avg_risk,
-                AVG(au.side_effect_cost) as avg_cost
+                AVG(au.expected_benefit)  AS avg_benefit,
+                AVG(au.complication_risk) AS avg_risk,
+                AVG(au.side_effect_cost)  AS avg_cost
             FROM action a
             JOIN action_utility au ON a.id = au.action_id
             WHERE a.disease_id = ?
             GROUP BY a.id, a.action_name
-            ORDER BY (AVG(au.expected_benefit) - AVG(au.complication_risk) - AVG(au.side_effect_cost)) DESC
+            ORDER BY (AVG(au.expected_benefit)
+                      - AVG(au.complication_risk)
+                      - AVG(au.side_effect_cost)) DESC
         """, (disease_id,))
-        
+
         results = []
         for row in cursor.fetchall():
             action_name, avg_benefit, avg_risk, avg_cost = row
             results.append({
                 "action_name": action_name,
                 "avg_benefit": round(avg_benefit, 4),
-                "avg_risk": round(avg_risk, 4),
-                "avg_cost": round(avg_cost, 4),
-                "net_utility": round(avg_benefit - avg_risk - avg_cost, 4)
+                "avg_risk":    round(avg_risk, 4),
+                "avg_cost":    round(avg_cost, 4),
+                "net_utility": round(avg_benefit - avg_risk - avg_cost, 4),
             })
         return results
 
@@ -671,277 +597,237 @@ def get_action_utility_comparison(disease_id: int) -> List[Dict[str, Any]]:
 def get_state_distribution() -> List[Dict[str, Any]]:
     """
     Counts how many patients are in each state per disease.
-    Powers the "success rate of states" insight.
-    
+    Powers the population health trend analytics.
+
     Returns:
-        List of dicts with keys: disease_name, state_name, severity_level, patient_count
+        List of dicts with keys: disease_name, state_name,
+        severity_level, patient_count
     """
     with get_connection() as conn:
         cursor = conn.execute("""
-            SELECT 
-                d.name as disease_name,
+            SELECT
+                d.name  AS disease_name,
                 ds.state_name,
                 ds.severity_level,
-                COUNT(ps.patient_id) as patient_count
-            FROM disease d
-            JOIN disease_state ds ON ds.disease_id = d.id
-            LEFT JOIN patient_status ps ON ps.current_state_id = ds.id
+                COUNT(ps.patient_id) AS patient_count
+            FROM patient_status ps
+            JOIN disease d ON ps.disease_id = d.id
+            JOIN disease_state ds ON ps.current_state_id = ds.id
             GROUP BY d.id, ds.id
             ORDER BY d.name, ds.severity_level
         """)
-        
         results = []
         for row in cursor.fetchall():
-            disease_name, state_name, severity_level, patient_count = row
             results.append({
-                "disease_name": disease_name,
-                "state_name": state_name,
-                "severity_level": severity_level,
-                "patient_count": patient_count
+                "disease_name":   row[0],
+                "state_name":     row[1],
+                "severity_level": row[2],
+                "patient_count":  row[3],
             })
         return results
 
 
 def get_benefit_risk_for_patient(patient_id: str) -> List[Tuple]:
     """
-    Returns a list of (action_name, expected_benefit, complication_risk, side_effect_cost)
+    Returns (action_name, expected_benefit, complication_risk, side_effect_cost)
     for the patient's current disease and state.
+    Used by the risk-benefit scatter plot.
     """
     with get_connection() as conn:
-        cursor = conn.execute("""
-            SELECT 
-                a.action_name,
-                au.expected_benefit,
-                au.complication_risk,
-                au.side_effect_cost
-            FROM patient_status ps
-            JOIN action a ON a.disease_id = ps.disease_id
-            JOIN action_utility au ON a.id = au.action_id AND au.state_id = ps.current_state_id
-            WHERE ps.patient_id = ?
-            ORDER BY a.action_name
-        """, (patient_id,))
-        return cursor.fetchall()
+        try:
+            cursor = conn.execute("""
+                SELECT
+                    a.action_name,
+                    au.expected_benefit,
+                    au.complication_risk,
+                    au.side_effect_cost
+                FROM patient_status ps
+                JOIN action a ON a.disease_id = ps.disease_id
+                JOIN action_utility au
+                    ON a.id = au.action_id
+                    AND au.state_id = ps.current_state_id
+                WHERE ps.patient_id = ?
+                ORDER BY a.action_name
+            """, (patient_id,))
+            return cursor.fetchall()
+        except sqlite3.OperationalError as e:
+            print(f"Error fetching benefit/risk for patient {patient_id}: {e}")
+            return []
 
 
 # ---------------------------------------------------------------------------
-# Recommendation tracking functions
+# Patient management
 # ---------------------------------------------------------------------------
 
-def log_recommendation(
-    patient_id: str,
-    recommended_action: str,
-    recommended_score: float,
-    clinician_decision: str,
-    override_action: Optional[str] = None
-) -> None:
+def get_diseases_with_states() -> List[Dict[str, Any]]:
     """
-    Log a clinical recommendation and the clinician's decision.
-    
-    Args:
-        patient_id: The patient ID
-        recommended_action: Name of the action recommended by the CDSS
-        recommended_score: The total score of the recommended action
-        clinician_decision: One of 'accept', 'reject', 'override'
-        override_action: If decision is 'override', the action the clinician chose instead
-    """
-    with get_connection() as conn:
-        conn.execute("""
-            INSERT INTO recommendation_run 
-            (patient_id, recommended_action, recommended_score, clinician_decision, override_action)
-            VALUES (?, ?, ?, ?, ?)
-        """, (patient_id, recommended_action, recommended_score, clinician_decision, override_action))
-        conn.commit()
+    Returns all diseases with their states and active model IDs.
+    Used for populating the Add Patient dialog dropdowns.
 
-
-def get_recommendation_history(patient_id: str, limit: int = 50) -> List[Dict[str, Any]]:
-    """
-    Get recommendation history for a specific patient.
-    
-    Args:
-        patient_id: The patient ID
-        limit: Maximum number of records to return
-        
     Returns:
-        List of dicts with recommendation data
+        List of dicts with keys: disease_id, disease_name, state_id,
+        state_name, severity_level, model_id, model_version
     """
     with get_connection() as conn:
         cursor = conn.execute("""
-            SELECT 
-                id,
-                recommended_action,
-                recommended_score,
-                clinician_decision,
-                override_action,
-                timestamp
-            FROM recommendation_run
-            WHERE patient_id = ?
-            ORDER BY timestamp DESC
-            LIMIT ?
-        """, (patient_id, limit))
-        
+            SELECT
+                d.id   AS disease_id,
+                d.name AS disease_name,
+                ds.id  AS state_id,
+                ds.state_name,
+                ds.severity_level,
+                mm.id  AS model_id,
+                mm.version AS model_version
+            FROM disease d
+            JOIN disease_state ds ON d.id = ds.disease_id
+            JOIN markov_model mm ON d.id = mm.disease_id
+            WHERE mm.is_active = 1
+            ORDER BY d.name, ds.severity_level
+        """)
         results = []
         for row in cursor.fetchall():
             results.append({
-                "id": row[0],
-                "recommended_action": row[1],
-                "recommended_score": row[2],
-                "clinician_decision": row[3],
-                "override_action": row[4],
-                "timestamp": row[5]
+                "disease_id":     row[0],
+                "disease_name":   row[1],
+                "state_id":       row[2],
+                "state_name":     row[3],
+                "severity_level": row[4],
+                "model_id":       row[5],
+                "model_version":  row[6],
             })
         return results
 
 
-def get_decision_analytics() -> Dict[str, Any]:
+def add_patient(patient_id: str, first_name: str, last_name: str,
+                disease_id: int, state_id: int, model_id: int) -> bool:
     """
-    Get analytics on clinician decisions across all patients.
-    
-    Returns:
-        Dict with acceptance rate, most common overrides, etc.
-    """
-    with get_connection() as conn:
-        # Total recommendations
-        cursor = conn.execute("SELECT COUNT(*) FROM recommendation_run")
-        total = cursor.fetchone()[0]
-        
-        if total == 0:
-            return {
-                "total_recommendations": 0,
-                "acceptance_rate": 0.0,
-                "rejection_rate": 0.0,
-                "override_rate": 0.0,
-                "most_overridden_action": None,
-                "top_overrides": []
-            }
-        
-        # Decision counts
-        cursor = conn.execute("""
-            SELECT 
-                clinician_decision,
-                COUNT(*) as count
-            FROM recommendation_run
-            GROUP BY clinician_decision
-        """)
-        
-        decision_counts = {row[0]: row[1] for row in cursor.fetchall()}
-        
-        accept_count = decision_counts.get('accept', 0)
-        reject_count = decision_counts.get('reject', 0)
-        override_count = decision_counts.get('override', 0)
-        
-        # Most overridden actions
-        cursor = conn.execute("""
-            SELECT 
-                recommended_action,
-                COUNT(*) as count
-            FROM recommendation_run
-            WHERE clinician_decision = 'override'
-            GROUP BY recommended_action
-            ORDER BY count DESC
-            LIMIT 5
-        """)
-        
-        top_overrides = [{"action": row[0], "count": row[1]} for row in cursor.fetchall()]
-        
-        # Most common override actions chosen
-        cursor = conn.execute("""
-            SELECT 
-                override_action,
-                COUNT(*) as count
-            FROM recommendation_run
-            WHERE clinician_decision = 'override' AND override_action IS NOT NULL
-            GROUP BY override_action
-            ORDER BY count DESC
-            LIMIT 5
-        """)
-        
-        most_overridden = cursor.fetchone()
-        
-        return {
-            "total_recommendations": total,
-            "acceptance_rate": round(accept_count / total * 100, 1) if total > 0 else 0,
-            "rejection_rate": round(reject_count / total * 100, 1) if total > 0 else 0,
-            "override_rate": round(override_count / total * 100, 1) if total > 0 else 0,
-            "most_overridden_action": most_overridden[0] if most_overridden else None,
-            "top_overrides": top_overrides
-        }
+    Add a new patient to the database.
 
-
-def get_clinician_feedback_summary(patient_id: str) -> Dict[str, Any]:
-    """
-    Get summary of clinician feedback for a specific patient.
-    
     Args:
-        patient_id: The patient ID
-        
+        patient_id: Unique patient ID (e.g. "P007")
+        first_name: Patient's first name
+        last_name: Patient's last name
+        disease_id: FK to disease(id)
+        state_id: FK to disease_state(id) for initial state
+        model_id: FK to markov_model(id) for active model
+
     Returns:
-        Dict with feedback summary
+        True if inserted successfully, False if patient_id already exists.
+    """
+    with get_connection() as conn:
+        try:
+            cursor = conn.execute("SELECT 1 FROM patient WHERE id = ?", (patient_id,))
+            if cursor.fetchone():
+                return False
+
+            conn.execute(
+                "INSERT INTO patient (id, first_name, last_name) VALUES (?, ?, ?)",
+                (patient_id, first_name, last_name))
+            conn.execute(
+                "INSERT INTO patient_status "
+                "(patient_id, disease_id, current_state_id, active_model_id) "
+                "VALUES (?, ?, ?, ?)",
+                (patient_id, disease_id, state_id, model_id))
+            conn.commit()
+            return True
+        except Exception as e:
+            print(f"Error adding patient: {e}")
+            return False
+
+
+def get_patient_summary_export() -> List[Dict[str, Any]]:
+    """
+    Returns all patients with full details for CSV export.
+
+    Returns:
+        List of dicts with keys: patient_id, first_name, last_name,
+        disease_name, current_state, severity_level, model_version
     """
     with get_connection() as conn:
         cursor = conn.execute("""
-            SELECT 
-                COUNT(*) as total,
-                SUM(CASE WHEN clinician_decision = 'accept' THEN 1 ELSE 0 END) as accepted,
-                SUM(CASE WHEN clinician_decision = 'reject' THEN 1 ELSE 0 END) as rejected,
-                SUM(CASE WHEN clinician_decision = 'override' THEN 1 ELSE 0 END) as overridden
-            FROM recommendation_run
-            WHERE patient_id = ?
-        """, (patient_id,))
-        
-        row = cursor.fetchone()
-        total, accepted, rejected, overridden = row
-        
-        return {
-            "total_recommendations": total or 0,
-            "accepted": accepted or 0,
-            "rejected": rejected or 0,
-            "overridden": overridden or 0,
-            "acceptance_rate": round((accepted or 0) / (total or 1) * 100, 1)
-        }
+            SELECT
+                p.id AS patient_id,
+                p.first_name,
+                p.last_name,
+                d.name AS disease_name,
+                ds.state_name AS current_state,
+                ds.severity_level,
+                mm.version AS model_version
+            FROM patient p
+            JOIN patient_status ps ON p.id = ps.patient_id
+            JOIN disease d ON ps.disease_id = d.id
+            JOIN disease_state ds ON ps.current_state_id = ds.id
+            JOIN markov_model mm ON ps.active_model_id = mm.id
+            ORDER BY p.id
+        """)
+        results = []
+        for row in cursor.fetchall():
+            results.append({
+                "patient_id":     row[0],
+                "first_name":     row[1],
+                "last_name":      row[2],
+                "disease_name":   row[3],
+                "current_state":  row[4],
+                "severity_level": row[5],
+                "model_version":  row[6],
+            })
+        return results
 
 
-def log_clinician_decision(patient_id: str, recommended_action: str, recommended_score: float,
-                           decision: str, override_action: str = None) -> None:
+# ---------------------------------------------------------------------------
+# Audit log
+# ---------------------------------------------------------------------------
+
+def log_clinician_decision(patient_id: str, recommended_action: str,
+                           recommended_score: float, decision: str,
+                           override_action: str = None) -> None:
     """
     Log a clinician's decision regarding a recommendation.
-    
+
     Args:
         patient_id: The patient's ID
-        recommended_action: Name of the recommended action (top-ranked)
-        recommended_score: Score of the recommended action
-        decision: 'accept', 'reject', or 'override'
-        override_action: If decision is 'override', the name of the action chosen instead
+        recommended_action: Name of the top-ranked recommended action
+        recommended_score: Total score of the recommended action
+        decision: One of 'accept', 'reject', 'override'
+        override_action: If decision is 'override', the action chosen instead
     """
     with get_connection() as conn:
         conn.execute("""
-            INSERT INTO recommendation_run 
-            (patient_id, recommended_action, recommended_score, clinician_decision, override_action)
+            INSERT INTO recommendation_run
+                (patient_id, recommended_action, recommended_score,
+                 clinician_decision, override_action)
             VALUES (?, ?, ?, ?, ?)
-        """, (patient_id, recommended_action, recommended_score, decision, override_action))
+        """, (patient_id, recommended_action, recommended_score,
+              decision, override_action))
         conn.commit()
+        
+def log_recommendation(patient_id, recommended_action, recommended_score,
+                       clinician_decision, override_action=None):
+    """Alias for log_clinician_decision for backward compatibility."""
+    log_clinician_decision(patient_id, recommended_action, recommended_score,
+                           clinician_decision, override_action)
 
 
-# ---------------------------------------------------------------------------
-# Audit log retrieval function
-# ---------------------------------------------------------------------------
-def get_audit_log(patient_id: str = None):
+def get_audit_log(patient_id: str = None) -> List[Tuple]:
     """
     Fetch audit log entries from recommendation_run.
-    
+
     Args:
-        patient_id: If provided, filter to a specific patient. If None, return all records.
-    
+        patient_id: If provided, filter to a specific patient.
+                    If None, return all records.
+
     Returns:
-        List of tuples: (patient_id, patient_name, recommended_action, recommended_score,
-                         clinician_decision, override_action, timestamp)
+        List of tuples: (patient_id, patient_name, recommended_action,
+                         recommended_score, clinician_decision,
+                         override_action, timestamp)
         Ordered by timestamp descending.
     """
     with get_connection() as conn:
         if patient_id:
             cursor = conn.execute("""
-                SELECT 
+                SELECT
                     p.id,
-                    p.first_name || ' ' || p.last_name as patient_name,
+                    p.first_name || ' ' || p.last_name AS patient_name,
                     rr.recommended_action,
                     rr.recommended_score,
                     rr.clinician_decision,
@@ -954,9 +840,9 @@ def get_audit_log(patient_id: str = None):
             """, (patient_id,))
         else:
             cursor = conn.execute("""
-                SELECT 
+                SELECT
                     p.id,
-                    p.first_name || ' ' || p.last_name as patient_name,
+                    p.first_name || ' ' || p.last_name AS patient_name,
                     rr.recommended_action,
                     rr.recommended_score,
                     rr.clinician_decision,
@@ -970,12 +856,21 @@ def get_audit_log(patient_id: str = None):
 
 
 # ---------------------------------------------------------------------------
-# Domain object conversion functions
+# Domain object conversion
 # ---------------------------------------------------------------------------
 
 def load_disease_model(patient_id: str) -> DiseaseModel:
     """
     Load the active disease model for a patient and return a DiseaseModel object.
+
+    Args:
+        patient_id: The patient's ID string
+
+    Returns:
+        DiseaseModel with states and transition matrix
+
+    Raises:
+        ValueError: If no model is found for the patient
     """
     state_names, matrix = get_model_for_patient(patient_id)
     if not state_names:
@@ -987,6 +882,12 @@ def load_actions(patient_id: str) -> List[Action]:
     """
     Load available actions for a patient and return a list of Action objects.
     immediate_utility is computed as benefit - risk - cost.
+
+    Args:
+        patient_id: The patient's ID string
+
+    Returns:
+        List of Action domain objects
     """
     rows = get_actions_for_patient(patient_id)
     actions = []
@@ -1003,76 +904,39 @@ def load_actions(patient_id: str) -> List[Action]:
 
 
 # ---------------------------------------------------------------------------
-# User authentication functions
+# User authentication
 # ---------------------------------------------------------------------------
 
-def get_user_by_username(username: str) -> Optional[Tuple[str, str]]:
-    """Returns (hashed_password, salt) or None if user not found."""
+def get_user_by_username(username: str):
+    """
+    Returns (hashed_password, salt) for the given username,
+    or None if user not found.
+    """
     with get_connection() as conn:
         cursor = conn.execute(
-            "SELECT hashed_password, salt FROM users WHERE username = ?", (username,)
-        )
+            "SELECT hashed_password, salt FROM users WHERE username = ?",
+            (username,))
         return cursor.fetchone()
 
 
 def create_user(username: str, hashed_password: str, salt: str) -> None:
-    """Inserts a new user into the database."""
+    """
+    Inserts a new user into the database.
+
+    Args:
+        username: Unique login username
+        hashed_password: SHA256 hash of (salt + password)
+        salt: Random salt used for hashing
+    """
     with get_connection() as conn:
         conn.execute(
             "INSERT INTO users (username, hashed_password, salt) VALUES (?, ?, ?)",
-            (username, hashed_password, salt)
-        )
+            (username, hashed_password, salt))
         conn.commit()
 
 
 # ---------------------------------------------------------------------------
-# Patient service function
-# ---------------------------------------------------------------------------
-
-def load_patients_with_actions() -> List:
-    """
-    Load all patients with their actions for UI display.
-    Returns a list of PatientRecord objects.
-    """
-    from ..domain.patient_record import PatientRecord
-    from ..domain.patient import Patient
-    from ..domain.macro_state import MacroState
-    from ..domain.disease_model import DiseaseModel
-    
-    records = []
-    for patient_id, full_name, current_state, disease_name in get_all_patients():
-        # Load disease model and actions
-        try:
-            disease_model = load_disease_model(patient_id)
-            actions = load_actions(patient_id)
-            
-            # Create MacroState with appropriate state index
-            state_index = disease_model.states.index(current_state) if current_state in disease_model.states else 0
-            
-            macro_state = MacroState(
-                state_index=state_index,
-                model=disease_model,
-                history=[],
-                action_utility_history=[]
-            )
-            
-            patient = Patient(
-                patient_id=patient_id,
-                name=full_name,
-                disease_name=disease_name,
-                macro_state=macro_state
-            )
-            
-            records.append(PatientRecord(patient=patient, actions=actions))
-        except Exception as e:
-            print(f"Error loading patient {patient_id}: {e}")
-            continue
-    
-    return records
-
-
-# ---------------------------------------------------------------------------
-# Direct execution — initialize and verify
+# Entry point — initialize and seed
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
@@ -1080,41 +944,9 @@ if __name__ == "__main__":
     init_db()
     print("Seeding data...")
     seed_data()
-
     print("\nVerification:")
     patients = get_all_patients()
     print(f"Found {len(patients)} patients:")
     for patient_id, full_name, state, disease_name in patients:
-        print(f"  - {patient_id}: {full_name} - {state} ({disease_name})")
-
-    # Test action utility comparison
-    print("\nAction Utility Comparison (Diabetes):")
-    diabetes_comparison = get_action_utility_comparison(1)  # Diabetes ID = 1
-    for item in diabetes_comparison:
-        print(f"  - {item['action_name']}: Net Utility = {item['net_utility']:.3f}")
-
-    # Test state distribution
-    print("\nState Distribution:")
-    state_dist = get_state_distribution()
-    for item in state_dist:
-        print(f"  - {item['disease_name']} - {item['state_name']}: {item['patient_count']} patients")
-
-    # Test loading a specific patient
-    test_patient = "P001"
-    print(f"\nLoading patient {test_patient}:")
-    disease_model = load_disease_model(test_patient)
-    print(f"  Disease Model: {disease_model.states}")
-    
-    actions = load_actions(test_patient)
-    print(f"  Actions ({len(actions)}):")
-    for action in actions:
-        print(f"    - {action.name}: utility={action.immediate_utility:.3f}")
-
-    # Test new detailed patient query
-    print("\nDetailed Patient Data:")
-    detailed = get_all_patients_detailed()
-    for patient in detailed:
-        print(f"  - {patient['patient_id']}: {patient['first_name']} {patient['last_name']} - "
-              f"Severity: {patient['severity_level']}, Model: {patient['model_version']}")
-
+        print(f"  - {patient_id}: {full_name} ({disease_name}) — {state}")
     print("\nDatabase ready!")
